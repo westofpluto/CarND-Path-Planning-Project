@@ -1,140 +1,27 @@
 # CarND-Path-Planning-Project
-Self-Driving Car Engineer Nanodegree Program
+Udacity Self-Driving Car Engineer Nanodegree Program, Term 3, Project 1
+
+### Project Summary
+
+The purpose of this project was to develop self-driving lane-management software that drives a vehicle around a simulated track, changing lanes as necessary to avoid other cars in the road. This software runs as a real-time controller that feeds inputs tothe Udacity self-driving car simulator. The project required that the simulated car must drive at least one loop (4.32 miles) around the track while staying within maximum acceleration and jerk limitations.
+
+The code in this repo successfully met those requirements. I posted a [video of the car driving more than one lap around the track](https://youtu.be/-LQDm5lD8TA) and included that video (video-output-final.mp4) in this repo. My path planner consisted of a finite state machine-based behavior manager that determined whether to stay in this lane, follow the (slower) car ahead, or change lanes to pass teh car ahead. A trajectory controller used decisions from the bahvior planner to sen actual steering and speed signals to the simulator. Since the simulator requires trajectory control points as control inputs, I used a spline package to specifiy the near-term desired trajectory that was sent to the simulator. The following section describes the implementation in more detail.
+
+###Code and Implementation Overview
+
+My implementation used a number of files as follows:
+
+* main.cpp: This file contains the main program for the path planning sofwtare, which communicates through a socket connection to the simulator. Every 0.02 seconds, the simulator sends navigation sensor information over the socket, the main program reads this, calls functions in the path planner to determine the control trajectory of the vehicle, then sends that control trajectory back over the socket to the simulator.
+* vehicle.cpp: This file contains classes that represent vehicles/cars on the road. A subclass of Vehicle is called EgoVehicle and tha represents the car we are trying to control.
+* other_vehicles.cpp: This file contains code that acts as a container for all the other vehicles on the road. This class was useful as an object to pass to the behavior planner.
+* behavior.cpp: This file contains a finite-state-machine implementation of the behavior planner. The FSM contains only 3 states: DRIVE FORWARD, FOLLOW CAR AHEAD, and CHANGE LANE. Lane changes can be to the lane to the left or to the right (depending of course upon which lane the car is currently driving in). The car begins in the DRIVE FORWARD state and tries to speed up to a speed just under the speed limit (just under 50 MPH). If/when the car detects that there is a car ahead that is going slower, the car will switch into the FOLLOW CAR AHEAD state where it slows its speed to match that of the car ahead. As soon as it enters this state, it starts looking for opportunities to switch lanes. In order to switch lanes, it must detect that neither the car ahead in the desired lane nor the car behind in the other lane are too close to the ego vehicle to allow a lane change. The behavior software also has a sanity check function that checks to see if there is any vehicle in the set of other vehicles that is too close to the ego vehicle to allow a lane change. When the ego vehicle detects that it can safely change lanes, it changes state to CHANGE LANE. As soon as the lane change maneuver is completed, the tate switches back to either DRIVE FORWARD or FOLLOW CAR AHEAD depending on the state of any car ahead of the ego vehicle in the new lane.
+* control.cpp: For every state of the vehicle specified in behavior.cpp, the file control.cpp specifies a desired control trajectory that implements the behavior of the given state. The control trajectories use some widely spaced desired control points and use a spline class (in spline.h) to interpolate near term control points from that trajectory. Control points are always appended to the end of the prior trajectory which is sent back from the simulator. Note that the choice of number of control points is important: too few control points and the car's trajectory becomes choppy, but too many control points results in too much control lag leading to ego vehicle trajectory instability.I ended up choosing 40 control points which results in a control trajectory of approximately 0.8 seconds in duration. This is of course recomputed every 0.02 seconds, so the resulting closed loop controller performs vehicle control that easily meets the project requirements.
+* utils.cpp: The original main.cpp file contained a numer of utility functions for converting back and forth between map coordinates and Frenet coordinates. I moved these functions into a separet file called utils.cpp
+* spline.h: This file implements the spline class that was used for spline interpolation.
+* constants.h: This file contains a number of the constant parameters used in the controller. This includes such items as the number of control points, the min safe distace values, speed limit, etc.
+
+At each time step, my code executes the following steps:
+* Start by extracting the sensor data for the ego vehicle and other vehicles in order to set the current positions and velocities of all vehicles.
+* Next, the state information for the ego vehicle and other vehicles is passed to the behaviro state machine through the method chooseNextState. In the states DRIVE FORWARD or FOLLOW CAR AHEAD, the chooseNextState method calls the method handle_drive_forward_behavior which sets the desired speed (used in the controller) and checks to see if we need to slow down due to a vehicle ahead in this lane. If the vehicle is currently in the FOLLOW CAR AHEAD state, then the chooseNextState method looks to see if it is appropriate to switch to the CHANGE LANE state. To switch safely, several facts must hold. The method isAnyCarTooClose is first called to see if there is any car that might prevent us from switching to that lane. Next the code focuses on cars that might be ahead or behind in the desired lane and checks their speeds to see if we even want to switch to that lane. (For example, if the car ahead in the other lane is going slower than the car ahead in our current lane, there is no good reason to switch lanes). If the car ahead and car behind in the other two lanes satisfy some basic safety conditions then the behavior module will switch state to the CHANGE LANE state. If the car is already in the CHANGE LANE state, the car calls the handle_change_lane_behavior method to determine the proper control speed depending on the cars ahead in both the current and desired lanes.
+* The result of the behavior module is both a current vehicle state machine state and a desired/control speed. These are passed to the controller, which takes this information, uses the spline class to interpolate a control trajectory, and sends this to the simulator.
    
-### Simulator.
-You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases/tag/T3_v1.2).
-
-### Goals
-In this project your goal is to safely navigate around a virtual highway with other traffic that is driving +-10 MPH of the 50 MPH speed limit. You will be provided the car's localization and sensor fusion data, there is also a sparse map list of waypoints around the highway. The car should try to go as close as possible to the 50 MPH speed limit, which means passing slower traffic when possible, note that other cars will try to change lanes too. The car should avoid hitting other cars at all cost as well as driving inside of the marked road lanes at all times, unless going from one lane to another. The car should be able to make one complete loop around the 6946m highway. Since the car is trying to go 50 MPH, it should take a little over 5 minutes to complete 1 loop. Also the car should not experience total acceleration over 10 m/s^2 and jerk that is greater than 10 m/s^3.
-
-#### The map of the highway is in data/highway_map.txt
-Each waypoint in the list contains  [x,y,s,dx,dy] values. x and y are the waypoint's map coordinate position, the s value is the distance along the road to get to that waypoint in meters, the dx and dy values define the unit normal vector pointing outward of the highway loop.
-
-The highway's waypoints loop around so the frenet s value, distance along the road, goes from 0 to 6945.554.
-
-## Basic Build Instructions
-
-1. Clone this repo.
-2. Make a build directory: `mkdir build && cd build`
-3. Compile: `cmake .. && make`
-4. Run it: `./path_planning`.
-
-Here is the data provided from the Simulator to the C++ Program
-
-#### Main car's localization Data (No Noise)
-
-["x"] The car's x position in map coordinates
-
-["y"] The car's y position in map coordinates
-
-["s"] The car's s position in frenet coordinates
-
-["d"] The car's d position in frenet coordinates
-
-["yaw"] The car's yaw angle in the map
-
-["speed"] The car's speed in MPH
-
-#### Previous path data given to the Planner
-
-//Note: Return the previous list but with processed points removed, can be a nice tool to show how far along
-the path has processed since last time. 
-
-["previous_path_x"] The previous list of x points previously given to the simulator
-
-["previous_path_y"] The previous list of y points previously given to the simulator
-
-#### Previous path's end s and d values 
-
-["end_path_s"] The previous list's last point's frenet s value
-
-["end_path_d"] The previous list's last point's frenet d value
-
-#### Sensor Fusion Data, a list of all other car's attributes on the same side of the road. (No Noise)
-
-["sensor_fusion"] A 2d vector of cars and then that car's [car's unique ID, car's x position in map coordinates, car's y position in map coordinates, car's x velocity in m/s, car's y velocity in m/s, car's s position in frenet coordinates, car's d position in frenet coordinates. 
-
-## Details
-
-1. The car uses a perfect controller and will visit every (x,y) point it recieves in the list every .02 seconds. The units for the (x,y) points are in meters and the spacing of the points determines the speed of the car. The vector going from a point to the next point in the list dictates the angle of the car. Acceleration both in the tangential and normal directions is measured along with the jerk, the rate of change of total Acceleration. The (x,y) point paths that the planner recieves should not have a total acceleration that goes over 10 m/s^2, also the jerk should not go over 50 m/s^3. (NOTE: As this is BETA, these requirements might change. Also currently jerk is over a .02 second interval, it would probably be better to average total acceleration over 1 second and measure jerk from that.
-
-2. There will be some latency between the simulator running and the path planner returning a path, with optimized code usually its not very long maybe just 1-3 time steps. During this delay the simulator will continue using points that it was last given, because of this its a good idea to store the last points you have used so you can have a smooth transition. previous_path_x, and previous_path_y can be helpful for this transition since they show the last points given to the simulator controller with the processed points already removed. You would either return a path that extends this previous path or make sure to create a new path that has a smooth transition with this last path.
-
-## Tips
-
-A really helpful resource for doing this project and creating smooth trajectories was using http://kluge.in-chemnitz.de/opensource/spline/, the spline function is in a single hearder file is really easy to use.
-
----
-
-## Dependencies
-
-* cmake >= 3.5
-  * All OSes: [click here for installation instructions](https://cmake.org/install/)
-* make >= 4.1
-  * Linux: make is installed by default on most Linux distros
-  * Mac: [install Xcode command line tools to get make](https://developer.apple.com/xcode/features/)
-  * Windows: [Click here for installation instructions](http://gnuwin32.sourceforge.net/packages/make.htm)
-* gcc/g++ >= 5.4
-  * Linux: gcc / g++ is installed by default on most Linux distros
-  * Mac: same deal as make - [install Xcode command line tools]((https://developer.apple.com/xcode/features/)
-  * Windows: recommend using [MinGW](http://www.mingw.org/)
-* [uWebSockets](https://github.com/uWebSockets/uWebSockets)
-  * Run either `install-mac.sh` or `install-ubuntu.sh`.
-  * If you install from source, checkout to commit `e94b6e1`, i.e.
-    ```
-    git clone https://github.com/uWebSockets/uWebSockets 
-    cd uWebSockets
-    git checkout e94b6e1
-    ```
-
-## Editor Settings
-
-We've purposefully kept editor configuration files out of this repo in order to
-keep it as simple and environment agnostic as possible. However, we recommend
-using the following settings:
-
-* indent using spaces
-* set tab width to 2 spaces (keeps the matrices in source code aligned)
-
-## Code Style
-
-Please (do your best to) stick to [Google's C++ style guide](https://google.github.io/styleguide/cppguide.html).
-
-## Project Instructions and Rubric
-
-Note: regardless of the changes you make, your project must be buildable using
-cmake and make!
-
-
-## Call for IDE Profiles Pull Requests
-
-Help your fellow students!
-
-We decided to create Makefiles with cmake to keep this project as platform
-agnostic as possible. Similarly, we omitted IDE profiles in order to ensure
-that students don't feel pressured to use one IDE or another.
-
-However! I'd love to help people get up and running with their IDEs of choice.
-If you've created a profile for an IDE that you think other students would
-appreciate, we'd love to have you add the requisite profile files and
-instructions to ide_profiles/. For example if you wanted to add a VS Code
-profile, you'd add:
-
-* /ide_profiles/vscode/.vscode
-* /ide_profiles/vscode/README.md
-
-The README should explain what the profile does, how to take advantage of it,
-and how to install it.
-
-Frankly, I've never been involved in a project with multiple IDE profiles
-before. I believe the best way to handle this would be to keep them out of the
-repo root to avoid clutter. My expectation is that most profiles will include
-instructions to copy files to a new location to get picked up by the IDE, but
-that's just a guess.
-
-One last note here: regardless of the IDE used, every submitted project must
-still be compilable with cmake and make./
-
-## How to write a README
-A well written README file can enhance your project and portfolio.  Develop your abilities to create professional README files by completing [this free course](https://www.udacity.com/course/writing-readmes--ud777).
-

@@ -8,16 +8,17 @@
 #include "Eigen-3.3/Eigen/Core"
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
+#include "utils.hpp"
+#include "vehicle.h"
+#include "other_vehicles.h"
+#include "behavior.h"
+#include "control.h"
 
 using namespace std;
 
 // for convenience
 using json = nlohmann::json;
 
-// For converting back and forth between radians and degrees.
-constexpr double pi() { return M_PI; }
-double deg2rad(double x) { return x * pi() / 180; }
-double rad2deg(double x) { return x * 180 / pi(); }
 
 // Checks if the SocketIO event has JSON data.
 // If there is data the JSON object in string format will be returned,
@@ -34,137 +35,13 @@ string hasData(string s) {
   return "";
 }
 
-double distance(double x1, double y1, double x2, double y2)
-{
-	return sqrt((x2-x1)*(x2-x1)+(y2-y1)*(y2-y1));
-}
-int ClosestWaypoint(double x, double y, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	double closestLen = 100000; //large number
-	int closestWaypoint = 0;
-
-	for(int i = 0; i < maps_x.size(); i++)
-	{
-		double map_x = maps_x[i];
-		double map_y = maps_y[i];
-		double dist = distance(x,y,map_x,map_y);
-		if(dist < closestLen)
-		{
-			closestLen = dist;
-			closestWaypoint = i;
-		}
-
-	}
-
-	return closestWaypoint;
-
-}
-
-int NextWaypoint(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-
-	int closestWaypoint = ClosestWaypoint(x,y,maps_x,maps_y);
-
-	double map_x = maps_x[closestWaypoint];
-	double map_y = maps_y[closestWaypoint];
-
-	double heading = atan2((map_y-y),(map_x-x));
-
-	double angle = fabs(theta-heading);
-  angle = min(2*pi() - angle, angle);
-
-  if(angle > pi()/4)
-  {
-    closestWaypoint++;
-  if (closestWaypoint == maps_x.size())
-  {
-    closestWaypoint = 0;
-  }
-  }
-
-  return closestWaypoint;
-}
-
-// Transform from Cartesian x,y coordinates to Frenet s,d coordinates
-vector<double> getFrenet(double x, double y, double theta, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int next_wp = NextWaypoint(x,y, theta, maps_x,maps_y);
-
-	int prev_wp;
-	prev_wp = next_wp-1;
-	if(next_wp == 0)
-	{
-		prev_wp  = maps_x.size()-1;
-	}
-
-	double n_x = maps_x[next_wp]-maps_x[prev_wp];
-	double n_y = maps_y[next_wp]-maps_y[prev_wp];
-	double x_x = x - maps_x[prev_wp];
-	double x_y = y - maps_y[prev_wp];
-
-	// find the projection of x onto n
-	double proj_norm = (x_x*n_x+x_y*n_y)/(n_x*n_x+n_y*n_y);
-	double proj_x = proj_norm*n_x;
-	double proj_y = proj_norm*n_y;
-
-	double frenet_d = distance(x_x,x_y,proj_x,proj_y);
-
-	//see if d value is positive or negative by comparing it to a center point
-
-	double center_x = 1000-maps_x[prev_wp];
-	double center_y = 2000-maps_y[prev_wp];
-	double centerToPos = distance(center_x,center_y,x_x,x_y);
-	double centerToRef = distance(center_x,center_y,proj_x,proj_y);
-
-	if(centerToPos <= centerToRef)
-	{
-		frenet_d *= -1;
-	}
-
-	// calculate s value
-	double frenet_s = 0;
-	for(int i = 0; i < prev_wp; i++)
-	{
-		frenet_s += distance(maps_x[i],maps_y[i],maps_x[i+1],maps_y[i+1]);
-	}
-
-	frenet_s += distance(0,0,proj_x,proj_y);
-
-	return {frenet_s,frenet_d};
-
-}
-
-// Transform from Frenet s,d coordinates to Cartesian x,y
-vector<double> getXY(double s, double d, const vector<double> &maps_s, const vector<double> &maps_x, const vector<double> &maps_y)
-{
-	int prev_wp = -1;
-
-	while(s > maps_s[prev_wp+1] && (prev_wp < (int)(maps_s.size()-1) ))
-	{
-		prev_wp++;
-	}
-
-	int wp2 = (prev_wp+1)%maps_x.size();
-
-	double heading = atan2((maps_y[wp2]-maps_y[prev_wp]),(maps_x[wp2]-maps_x[prev_wp]));
-	// the x,y,s along the segment
-	double seg_s = (s-maps_s[prev_wp]);
-
-	double seg_x = maps_x[prev_wp]+seg_s*cos(heading);
-	double seg_y = maps_y[prev_wp]+seg_s*sin(heading);
-
-	double perp_heading = heading-pi()/2;
-
-	double x = seg_x + d*cos(perp_heading);
-	double y = seg_y + d*sin(perp_heading);
-
-	return {x,y};
-
-}
-
 int main() {
   uWS::Hub h;
+
+  int iterationCnt=0;
+
+  CarBehaviorStateMachine behaviorStateMachine;
+  TrajectoryControl controller;
 
   // Load up map values for waypoint's x,y,s and d normalized normal vectors
   vector<double> map_waypoints_x;
@@ -200,7 +77,7 @@ int main() {
   	map_waypoints_dy.push_back(d_y);
   }
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
+  h.onMessage([&iterationCnt,&behaviorStateMachine,&controller,&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
                      uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -217,6 +94,10 @@ int main() {
         string event = j[0].get<string>();
         
         if (event == "telemetry") {
+
+                iterationCnt++;
+                //cout << iterationCnt << endl;
+
           // j[1] is the data JSON object
           
         	// Main car's localization Data
@@ -227,31 +108,143 @@ int main() {
           	double car_yaw = j[1]["yaw"];
           	double car_speed = j[1]["speed"];
 
+                map<string,double> ego_vehicle_data; 
+                /***
+                ego_vehicle_data.insert ( {"x",car_x} );
+                ego_vehicle_data.insert ( {"y",car_y} );
+                ego_vehicle_data.insert ( {"s",car_s} );
+                ego_vehicle_data.insert ( {"d",car_d} );
+                ego_vehicle_data.insert ( {"yaw",car_yaw} );
+                ego_vehicle_data.insert ( {"speed",car_speed} );
+                **/
+
           	// Previous path data given to the Planner
-          	auto previous_path_x = j[1]["previous_path_x"];
-          	auto previous_path_y = j[1]["previous_path_y"];
+          	vector<double> previous_path_x = j[1]["previous_path_x"];
+          	vector<double> previous_path_y = j[1]["previous_path_y"];
+
           	// Previous path's end s and d values 
           	double end_path_s = j[1]["end_path_s"];
           	double end_path_d = j[1]["end_path_d"];
 
+                int prev_size = previous_path_x.size();
+
+                //
+                // determine yaw at end of prior path
+                //
+                double ref_x = car_x;
+                double ref_y = car_y;
+                double ref_yaw = deg2rad(car_yaw);
+                if (prev_size < 2) {
+                    double prev_car_x = car_x - cos(car_yaw);
+                    double prev_car_y = car_y - sin(car_yaw);
+                    ego_vehicle_data.clear();
+                    ego_vehicle_data.insert ( {"x_now",car_x} );
+                    ego_vehicle_data.insert ( {"y_now",car_y} );
+                    ego_vehicle_data.insert ( {"s_now",car_s} );
+                    ego_vehicle_data.insert ( {"d_now",car_d} );
+                    ego_vehicle_data.insert ( {"yaw_now",car_yaw} );
+                    ego_vehicle_data.insert ( {"speed_now",car_speed} );
+                    ego_vehicle_data.insert ( {"x",car_x} );
+                    ego_vehicle_data.insert ( {"y",car_y} );
+                    ego_vehicle_data.insert ( {"s",car_s} );
+                    ego_vehicle_data.insert ( {"d",car_d} );
+                    ego_vehicle_data.insert ( {"yaw",car_yaw} );
+                    ego_vehicle_data.insert ( {"speed",car_speed} );
+                } else {
+                    ref_x = previous_path_x[prev_size-1];
+                    ref_y = previous_path_y[prev_size-1];
+                    double ref_x_prev = previous_path_x[prev_size-2];
+                    double ref_y_prev = previous_path_y[prev_size-2];
+                    ref_yaw = atan2(ref_y - ref_y_prev,ref_x - ref_x_prev);
+                    int lastIdx=prev_size-1;
+
+                    ego_vehicle_data.clear();
+                    ego_vehicle_data.insert ( {"x_now",car_x} );
+                    ego_vehicle_data.insert ( {"y_now",car_y} );
+                    ego_vehicle_data.insert ( {"s_now",car_s} );
+                    ego_vehicle_data.insert ( {"d_now",car_d} );
+                    ego_vehicle_data.insert ( {"yaw_now",car_yaw} );
+                    ego_vehicle_data.insert ( {"speed_now",car_speed} );
+                    
+                    car_x = previous_path_x[lastIdx];                    
+                    car_y = previous_path_y[lastIdx]; 
+                    car_s = end_path_s;                   
+                    car_d = end_path_d;                   
+                    car_yaw = rad2deg(ref_yaw); 
+                    car_speed = distance(ref_x_prev,ref_y_prev,car_x,car_y)/DELTA_TIME;
+                    ego_vehicle_data.insert ( {"x",car_x} );
+                    ego_vehicle_data.insert ( {"y",car_y} );
+                    ego_vehicle_data.insert ( {"s",car_s} );
+                    ego_vehicle_data.insert ( {"d",car_d} );
+                    ego_vehicle_data.insert ( {"yaw",car_yaw} );
+                    ego_vehicle_data.insert ( {"speed",car_speed} );
+
+                }
+
+                //
+                // The values for the state in car are for a time current_time = prev_size*0.02
+                // So we must propagate all other cars ahead by that time
+                //
+                double dt_prop = prev_size*DELTA_TIME;
+
+
           	// Sensor Fusion Data, a list of all other cars on the same side of the road.
           	auto sensor_fusion = j[1]["sensor_fusion"];
+                int num_cars = sensor_fusion.size();
+                vector<vector<double>> alldata;
+                for (int i=0;i<num_cars;i++) {
+                    vector<double> cardata = sensor_fusion[i];
+                    alldata.push_back(cardata);
+                }
+                OtherVehicleSet other_vehicle_set;
+                other_vehicle_set.Init(alldata,dt_prop,map_waypoints_s, map_waypoints_x, map_waypoints_y);
 
           	json msgJson;
 
-          	vector<double> next_x_vals;
-          	vector<double> next_y_vals;
+
+                EgoVehicle car;
+
+                /***
+                map<string, double>::iterator it;
+                for ( it = ego_vehicle_data.begin(); it != ego_vehicle_data.end(); it++ ) {
+                    std::cout << it->first  // string (key)
+                        << ':'
+                        << it->second   // double value 
+                        << std::endl ;
+                }
+                **/
+
+                car.localize_self(ego_vehicle_data);
+                behaviorStateMachine.new_iteration(&car);
 
 
-          	// TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
-          	msgJson["next_x"] = next_x_vals;
-          	msgJson["next_y"] = next_y_vals;
+                CarBehaviorState *current_state = behaviorStateMachine.chooseNextState(&other_vehicle_set,iterationCnt);
 
+                //
+                // Here current_state is the current behavior state. Now that we know what state we are in,
+                // we must execute control actions that are consistent with that state. Our ultimate objective
+                // is to send a set of vector<double> values for x and y positions that we wish the car to get
+                // to at each time step ahead
+                //
+                controller.new_iteration(&behaviorStateMachine,previous_path_x,previous_path_y);
+                controller.generate_path(map_waypoints_s, map_waypoints_x, map_waypoints_y);
+
+                //
+                // Now send control path to socket
+                //
+          	msgJson["next_x"] = controller.next_x_vals;
+          	msgJson["next_y"] = controller.next_y_vals;
+
+                //controller.print_trajectory();
+
+                //cout << "num x vals is " << controller.next_x_vals.size() << endl;
+                //cout << "num y vals is " << controller.next_y_vals.size() << endl;
+                
           	auto msg = "42[\"control\","+ msgJson.dump()+"]";
 
           	//this_thread::sleep_for(chrono::milliseconds(1000));
           	ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-          
+
         }
       } else {
         // Manual driving
